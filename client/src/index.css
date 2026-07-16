@@ -1,0 +1,48 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-panel-900 text-panel-100 font-sans antialiased selection:bg-running-teal selection:text-panel-900;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #1C1E20;
+}
+::-webkit-scrollbar-thumb {
+  background: #4A4E52;
+  border-radius: 0px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4FA69C;
+}
+
+/* Custom styles for HMI mimic details */
+.mimic-line {
+  stroke-width: 2;
+  stroke: #E8E9EA;
+  fill: none;
+}
+
+.mimic-line-active {
+  stroke-width: 2;
+  stroke: #4FA69C;
+  fill: none;
+  stroke-dasharray: 5, 5;
+  animation: flow 2s linear infinite;
+}
+
+@keyframes flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}

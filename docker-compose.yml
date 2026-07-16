@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: floorsense-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: floorsense
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  simulation-engine:
+    build: ./simulation-engine
+    container_name: floorsense-sim-engine
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - BACKEND_URL=http://backend:5000
+    volumes:
+      - ./simulation-engine:/app
+    command: python main.py
+
+  backend:
+    build: ./server
+    container_name: floorsense-backend
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+    environment:
+      - PORT=5000
+      - WS_PORT=5001
+      - DB_TYPE=postgres
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=password
+      - DB_NAME=floorsense
+      - SIM_ENGINE_URL=http://simulation-engine:8000
+      - SIM_ENGINE_WS=ws://simulation-engine:8000/ws
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./server:/app
+      - /app/node_modules
+    command: npm run dev
+
+  client:
+    build: ./client
+    container_name: floorsense-client
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./client:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:5000
+      - VITE_WS_URL=ws://localhost:5001
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
