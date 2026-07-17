@@ -4,6 +4,8 @@ import db from '../config/database';
 
 const SIM_ENGINE_URL = process.env.SIM_ENGINE_URL || 'http://localhost:8000';
 
+const activeRuns = new Set<string>();
+
 interface Assertion {
   tag: string;
   operator: '==' | '!=' | '>' | '<' | '>=' | '<=';
@@ -77,6 +79,10 @@ export async function runTestPlan(req: Request, res: Response) {
     const steps: TestStep[] = JSON.parse(testPlan.steps);
     const machineId = testPlan.machine_id;
 
+    if (activeRuns.has(machineId)) {
+      return res.status(400).json({ error: 'A test plan is already running for this machine.' });
+    }
+
     // 1. Ensure machine simulation is started
     const machine = await db('machines').where('id', machineId).first();
     if (!machine) {
@@ -102,6 +108,9 @@ export async function runTestPlan(req: Request, res: Response) {
       // Ignored if already running
     }
 
+    // Lock the runner for this machine
+    activeRuns.add(machineId);
+
     // Inform client that the test plan execution has started in background
     // (We will run it asynchronously, updating the database as we go)
     res.json({ message: 'Test plan run started', testPlanId: id });
@@ -115,155 +124,160 @@ export async function runTestPlan(req: Request, res: Response) {
 }
 
 async function executeTestPlanInBackground(testPlanId: string, machineId: string, steps: TestStep[]) {
-  const results: any[] = [];
-  let planPassed = true;
+  try {
+    const results: any[] = [];
+    let planPassed = true;
 
-  // Log the test start
-  await db('event_logs').insert({
-    machine_id: machineId,
-    timestamp: new Date(),
-    source: 'system',
-    actor: 'test-runner',
-    new_value: `STARTING TEST PLAN RUN: ${testPlanId}`
-  });
-
-  for (const step of steps) {
-    const stepResult = {
-      stepNumber: step.stepNumber,
-      name: step.name,
-      status: 'pending',
-      error: '',
-      startedAt: new Date().toISOString(),
-      endedAt: ''
-    };
-
-    try {
-      // 1. Apply Actions
-      for (const action of step.actions) {
-        if (action.type === 'write') {
-          await axios.post(`${SIM_ENGINE_URL}/api/simulation/write`, {
-            machineId,
-            tagName: action.tag,
-            value: action.value
-          });
-        } else if (action.type === 'force') {
-          await axios.post(`${SIM_ENGINE_URL}/api/simulation/force`, {
-            machineId,
-            tagName: action.tag,
-            value: action.value
-          });
-        } else if (action.type === 'unforce') {
-          await axios.post(`${SIM_ENGINE_URL}/api/simulation/unforce`, {
-            machineId,
-            tagName: action.tag
-          });
-        }
-        
-        // Log action execution
-        await db('event_logs').insert({
-          machine_id: machineId,
-          timestamp: new Date(),
-          source: 'system',
-          tag_ref: action.tag,
-          new_value: `TEST_ACTION: ${action.type.toUpperCase()}(${action.value !== undefined ? action.value : ''})`,
-          actor: 'test-runner'
-        });
-      }
-
-      // 2. Poll Assertions
-      const pollIntervalMs = 250;
-      const maxTicks = Math.ceil(step.timeoutMs / pollIntervalMs);
-      let assertionsPassed = false;
-      let tick = 0;
-
-      while (tick < maxTicks) {
-        // Read live tags from simulation engine
-        const stateRes = await axios.get(`${SIM_ENGINE_URL}/api/simulation/${machineId}`);
-        const currentTags = stateRes.data.tags;
-
-        // Evaluate all assertions for this step
-        let stepAssertionsOk = true;
-        for (const assert of step.assertions) {
-          const tagObj = currentTags[assert.tag];
-          if (!tagObj) {
-            stepAssertionsOk = false;
-            break;
-          }
-          
-          const tagVal = tagObj.forced ? tagObj.forcedValue : tagObj.value;
-          const targetVal = assert.value;
-          
-          let ok = false;
-          if (assert.operator === '==') ok = tagVal === targetVal;
-          else if (assert.operator === '!=') ok = tagVal !== targetVal;
-          else if (assert.operator === '>') ok = tagVal > targetVal;
-          else if (assert.operator === '<') ok = tagVal < targetVal;
-          else if (assert.operator === '>=') ok = tagVal >= targetVal;
-          else if (assert.operator === '<=') ok = tagVal <= targetVal;
-          
-          if (!ok) {
-            stepAssertionsOk = false;
-            break;
-          }
-        }
-
-        if (stepAssertionsOk) {
-          assertionsPassed = true;
-          break;
-        }
-
-        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-        tick++;
-      }
-
-      stepResult.endedAt = new Date().toISOString();
-      if (assertionsPassed) {
-        stepResult.status = 'passed';
-      } else {
-        stepResult.status = 'failed';
-        stepResult.error = `Assertion timeout. Conditions not met within ${step.timeoutMs}ms.`;
-        planPassed = false;
-      }
-    } catch (err: any) {
-      stepResult.endedAt = new Date().toISOString();
-      stepResult.status = 'failed';
-      stepResult.error = `Runner error: ${err.message}`;
-      planPassed = false;
-    }
-
-    results.push(stepResult);
-
-    // Log step completion
+    // Log the test start
     await db('event_logs').insert({
       machine_id: machineId,
       timestamp: new Date(),
       source: 'system',
-      new_value: `TEST STEP ${step.stepNumber} COMPLETED: ${stepResult.status.toUpperCase()}`,
-      actor: 'test-runner'
+      actor: 'test-runner',
+      new_value: `STARTING TEST PLAN RUN: ${testPlanId}`
     });
 
-    // If a step fails, abort the rest of the plan
-    if (!planPassed) {
-      break;
+    for (const step of steps) {
+      const stepResult = {
+        stepNumber: step.stepNumber,
+        name: step.name,
+        status: 'pending',
+        error: '',
+        startedAt: new Date().toISOString(),
+        endedAt: ''
+      };
+
+      try {
+        // 1. Apply Actions
+        for (const action of step.actions) {
+          if (action.type === 'write') {
+            await axios.post(`${SIM_ENGINE_URL}/api/simulation/write`, {
+              machineId,
+              tagName: action.tag,
+              value: action.value
+            });
+          } else if (action.type === 'force') {
+            await axios.post(`${SIM_ENGINE_URL}/api/simulation/force`, {
+              machineId,
+              tagName: action.tag,
+              value: action.value
+            });
+          } else if (action.type === 'unforce') {
+            await axios.post(`${SIM_ENGINE_URL}/api/simulation/unforce`, {
+              machineId,
+              tagName: action.tag
+            });
+          }
+          
+          // Log action execution
+          await db('event_logs').insert({
+            machine_id: machineId,
+            timestamp: new Date(),
+            source: 'system',
+            tag_ref: action.tag,
+            new_value: `TEST_ACTION: ${action.type.toUpperCase()}(${action.value !== undefined ? action.value : ''})`,
+            actor: 'test-runner'
+          });
+        }
+
+        // 2. Poll Assertions
+        const pollIntervalMs = 250;
+        const maxTicks = Math.ceil(step.timeoutMs / pollIntervalMs);
+        let assertionsPassed = false;
+        let tick = 0;
+
+        while (tick < maxTicks) {
+          // Read live tags from simulation engine
+          const stateRes = await axios.get(`${SIM_ENGINE_URL}/api/simulation/${machineId}`);
+          const currentTags = stateRes.data.tags;
+
+          // Evaluate all assertions for this step
+          let stepAssertionsOk = true;
+          for (const assert of step.assertions) {
+            const tagObj = currentTags[assert.tag];
+            if (!tagObj) {
+              stepAssertionsOk = false;
+              break;
+            }
+            
+            const tagVal = tagObj.forced ? tagObj.forcedValue : tagObj.value;
+            const targetVal = assert.value;
+            
+            let ok = false;
+            if (assert.operator === '==') ok = tagVal === targetVal;
+            else if (assert.operator === '!=') ok = tagVal !== targetVal;
+            else if (assert.operator === '>') ok = tagVal > targetVal;
+            else if (assert.operator === '<') ok = tagVal < targetVal;
+            else if (assert.operator === '>=') ok = tagVal >= targetVal;
+            else if (assert.operator === '<=') ok = tagVal <= targetVal;
+            
+            if (!ok) {
+              stepAssertionsOk = false;
+              break;
+            }
+          }
+
+          if (stepAssertionsOk) {
+            assertionsPassed = true;
+            break;
+          }
+
+          await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+          tick++;
+        }
+
+        stepResult.endedAt = new Date().toISOString();
+        if (assertionsPassed) {
+          stepResult.status = 'passed';
+        } else {
+          stepResult.status = 'failed';
+          stepResult.error = `Assertion timeout. Conditions not met within ${step.timeoutMs}ms.`;
+          planPassed = false;
+        }
+      } catch (err: any) {
+        stepResult.endedAt = new Date().toISOString();
+        stepResult.status = 'failed';
+        stepResult.error = `Runner error: ${err.message}`;
+        planPassed = false;
+      }
+
+      results.push(stepResult);
+
+      // Log step completion
+      await db('event_logs').insert({
+        machine_id: machineId,
+        timestamp: new Date(),
+        source: 'system',
+        new_value: `TEST STEP ${step.stepNumber} COMPLETED: ${stepResult.status.toUpperCase()}`,
+        actor: 'test-runner'
+      });
+
+      // If a step fails, abort the rest of the plan
+      if (!planPassed) {
+        break;
+      }
     }
-  }
 
-  // Update DB with results
-  const passFail = planPassed ? 'passed' : 'failed';
-  await db('test_plans')
-    .where('id', testPlanId)
-    .update({
-      pass_fail: passFail,
-      last_run_at: new Date(),
-      results: JSON.stringify(results)
+    // Update DB with results
+    const passFail = planPassed ? 'passed' : 'failed';
+    await db('test_plans')
+      .where('id', testPlanId)
+      .update({
+        pass_fail: passFail,
+        last_run_at: new Date(),
+        results: JSON.stringify(results)
+      });
+
+    // Log final test status
+    await db('event_logs').insert({
+      machine_id: machineId,
+      timestamp: new Date(),
+      source: 'system',
+      actor: 'test-runner',
+      new_value: `TEST PLAN COMPLETED: ${passFail.toUpperCase()}`
     });
-
-  // Log final test status
-  await db('event_logs').insert({
-    machine_id: machineId,
-    timestamp: new Date(),
-    source: 'system',
-    actor: 'test-runner',
-    new_value: `TEST PLAN COMPLETED: ${passFail.toUpperCase()}`
-  });
+  } finally {
+    // Release the runner lock for this machine
+    activeRuns.delete(machineId);
+  }
 }

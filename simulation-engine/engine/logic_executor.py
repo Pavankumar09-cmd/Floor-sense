@@ -77,7 +77,7 @@ class LogicExecutor:
         eval_parts = []
         for token in tokens:
             lower_token = token.lower()
-            if lower_token in ("and", "or", "not"):
+            if lower_token in ("and", "or", "not", "if", "else"):
                 eval_parts.append(lower_token)
             elif lower_token == "true":
                 eval_parts.append("True")
